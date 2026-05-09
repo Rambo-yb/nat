@@ -22,7 +22,7 @@ static int HttpResponseCb(void* ptr, int size, int nmemb, void* userp) {
     return size*nmemb;
 }
 
-int HttpRequest(const char* method, const char* url, const char* body, char* res, int res_size, int timeout){
+int HttpRequest(const char* method, const char* url, const char** header, int num, const char* body, char* res, int res_size, int timeout){
     CHECK_POINTER(url, return -1);
     CHECK_POINTER(res, return -1);
 
@@ -43,6 +43,10 @@ int HttpRequest(const char* method, const char* url, const char* body, char* res
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout);
 
     struct curl_slist *headers = NULL;
+	for(int i = 0; i < num; i++) {
+        headers = curl_slist_append(headers, header[i]);
+	}
+
     if (strcmp(method, "POST") == 0) {
         headers = curl_slist_append(headers, "Content-Type: application/json");
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);

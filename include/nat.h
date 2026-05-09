@@ -7,6 +7,7 @@ extern "C" {
 
 typedef struct {
 	const char* log_path;			///< 日志路径, 【NULL:"/data/logs"】
+	const char* conf_path;			///< 配置路径, 【NULL:"/data/confs"】
 }NatInitialInfo;
 /**
  * @brief NAT初始化

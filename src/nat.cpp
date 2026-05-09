@@ -10,16 +10,21 @@
 
 #include "rtc/rtc.h"
 #include "openssl/pem.h"
+#include "openssl/rand.h"
 
 #include "cjson_common.h"
 #include "check_common.h"
+#include "http_client.h"
 
 #include "nat.h"
+#include "nat_conf.h"
 
 #define NAT_LIB_VERSION ("V1.0.0")
 #define NAT_DEFAULT_LOGS_PATH "/data/logs"
+#define NAT_DEFAULT_CONFS_PATH "/data/confs"
 
-#define NAT_SIGNALING_SERVER_URL "ws://10.42.0.201:8765"
+// #define NAT_SIGNALING_SERVER_URL "ws://10.42.0.201:8765"
+#define NAT_SIGNALING_SERVER_URL "ws://8.136.196.77:8765"
 
 typedef struct {
 	int pc;
@@ -28,9 +33,12 @@ typedef struct {
 
 typedef struct {
 	char serial[128];
-	int server_websocket;
+	int ws;
+	int ws_connect_status;
+	int ws_connect_fail;
 	std::map<std::string, NatClientInfo> client_map;
     pthread_mutex_t mutex;
+	pthread_t pthread_id;
 }NatMng;
 static NatMng kNatMng = {.mutex = PTHREAD_MUTEX_INITIALIZER};
 
@@ -76,6 +84,21 @@ static int NatEncryptBase64(const unsigned char* in, int in_size, char* out, int
     return len;
 }
 
+static int NatUuid(char* uuid, int size) {
+	unsigned char buff[16] = {0};
+	CHECK_EQ(RAND_bytes(buff, sizeof(buff)), 1, return -1);
+	
+	buff[6] = (buff[6] & 0x0F) | 0x40;
+	buff[8] = (buff[8] & 0x3F) | 0x80;
+
+	snprintf(uuid, size,
+             "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+             buff[0], buff[1], buff[2], buff[3],
+             buff[4], buff[5], buff[6], buff[7],
+             buff[8], buff[9], buff[10], buff[11],
+             buff[12], buff[13], buff[14], buff[15]);
+	return 0;
+}
 
 static void NatRtcDescriptionCb(int pc, const char *sdp, const char *type, void *ptr) {
 	LOG_INFO("Description %s :\n %s", type, sdp);
@@ -85,7 +108,11 @@ static void NatRtcDescriptionCb(int pc, const char *sdp, const char *type, void 
 			cJSON* json = cJSON_CreateObject();
 			CHECK_POINTER(json, break);
 
+			char session[64] = {0};
+			NatUuid(session, sizeof(session));
+
 			CJSON_SET_STRING(json, "type", type, cJSON_free(json);break);
+			CJSON_SET_STRING(json, "session_id", session, cJSON_free(json);break);
 			CJSON_SET_STRING(json, "serial", kNatMng.serial, cJSON_free(json);break);
 			CJSON_SET_STRING(json, "target", i.first.c_str(), cJSON_free(json);break);
 
@@ -93,9 +120,9 @@ static void NatRtcDescriptionCb(int pc, const char *sdp, const char *type, void 
 			NatEncryptBase64((const unsigned char*)sdp, strlen(sdp), encrypt_sdp, sizeof(encrypt_sdp));
 			CJSON_SET_STRING(json, "sdp", encrypt_sdp, cJSON_free(json);break);
 
-			char* buff = cJSON_Print(json);
+			char* buff = cJSON_PrintUnformatted(json);
 			CHECK_POINTER(buff, cJSON_free(json);break);
-			rtcSendMessage(kNatMng.server_websocket, buff, strlen(buff));
+			rtcSendMessage(kNatMng.ws, buff, strlen(buff));
 			free(buff);
 			cJSON_free(json);
 			
@@ -113,15 +140,19 @@ static void NatRtcCandidateCb(int pc, const char *cand, const char *mid, void *p
 			cJSON* json = cJSON_CreateObject();
 			CHECK_POINTER(json, break);
 
+			char session[64] = {0};
+			NatUuid(session, sizeof(session));
+
 			CJSON_SET_STRING(json, "type", "candidate", cJSON_free(json);break);
+			CJSON_SET_STRING(json, "session_id", session, cJSON_free(json);break);
 			CJSON_SET_STRING(json, "serial", kNatMng.serial, cJSON_free(json);break);
 			CJSON_SET_STRING(json, "target", i.first.c_str(), cJSON_free(json);break);
 			CJSON_SET_STRING(json, "candidate", cand, cJSON_free(json);break);
 			CJSON_SET_STRING(json, "mid", mid != NULL ? mid : "", cJSON_free(json);break);
 
-			char* buff = cJSON_Print(json);
+			char* buff = cJSON_PrintUnformatted(json);
 			CHECK_POINTER(buff, cJSON_free(json);break);
-			rtcSendMessage(kNatMng.server_websocket, buff, strlen(buff));
+			rtcSendMessage(kNatMng.ws, buff, strlen(buff));
 			free(buff);
 			cJSON_free(json);
 			
@@ -133,6 +164,18 @@ static void NatRtcCandidateCb(int pc, const char *cand, const char *mid, void *p
 
 static void NatRtcStateChangeCb(int pc, rtcState state, void *ptr) {
 	LOG_INFO("State : %d", state);
+	if (state == RTC_CLOSED) {
+		pthread_mutex_lock(&kNatMng.mutex);
+		for(auto &i : kNatMng.client_map ) {
+			if (i.second.pc == pc) {
+				rtcDeleteDataChannel(i.second.dc);
+				rtcDeletePeerConnection(i.second.pc);
+				kNatMng.client_map.erase(i.first);
+				break;
+			}
+		}
+		pthread_mutex_unlock(&kNatMng.mutex);
+	}
 }
 
 static void NatRtcIceStateChangeCb(int pc, rtcIceState state, void *ptr) {
@@ -157,23 +200,32 @@ static void RTC_API dataChannelCallback(int pc, int dc, void *ptr) {
 }
 
 static void NatRtcOpenCb(int id, void* user_ptr) {
+	kNatMng.ws_connect_status = 1;
+
 	cJSON* json = cJSON_CreateObject();
 	CHECK_POINTER(json, return );
 
+	char session[64] = {0};
+	NatUuid(session, sizeof(session));
+
 	CJSON_SET_STRING(json, "type", "register", cJSON_free(json);return );
+	CJSON_SET_STRING(json, "session_id", session, cJSON_free(json);return );
 	CJSON_SET_STRING(json, "serial", kNatMng.serial, cJSON_free(json);return );
 
-	char* buff = cJSON_Print(json);
+	char* buff = cJSON_PrintUnformatted(json);
     CHECK_POINTER(buff, cJSON_free(json);return );
 
-	// todo 注册失败处理
 	rtcSendMessage(id, buff, -1);
 	free(buff);
 	cJSON_free(json);
 }
 
 static void NatRtcCloseCb(int id, void* user_ptr) {
-
+	if (kNatMng.ws == id) {
+		kNatMng.ws_connect_status = 0;
+		rtcDeleteWebSocket(kNatMng.ws);
+		kNatMng.ws = 0;
+	}
 }
 
 static void NatPeerConnection(NatClientInfo* cli_info) {
@@ -189,22 +241,30 @@ static void NatPeerConnection(NatClientInfo* cli_info) {
 	rtcSetLocalDescriptionCallback(cli_info->pc, NatRtcDescriptionCb);
 	rtcSetLocalCandidateCallback(cli_info->pc, NatRtcCandidateCb);
 	rtcSetStateChangeCallback(cli_info->pc, NatRtcStateChangeCb);
-	rtcSetIceStateChangeCallback(cli_info->pc, NatRtcIceStateChangeCb);
-	rtcSetGatheringStateChangeCallback(cli_info->pc, NatRtcGatheringStateCb);
+	// rtcSetIceStateChangeCallback(cli_info->pc, NatRtcIceStateChangeCb);
+	// rtcSetGatheringStateChangeCallback(cli_info->pc, NatRtcGatheringStateCb);
 	rtcSetDataChannelCallback(cli_info->pc, dataChannelCallback);	
 
 }
 
+#define NAT_WS_MESSAGE_ERROR_RESP(r, c, m, s) \
+	snprintf(r, sizeof(r), "{\"type\":\"response\", \"code\":%d, \"session_id\":\"%s\", \"message\":\"%s\"}", c, s, m)
+
 static void NatWsMessageProc(int id, const char* message, int size) {
 	char resp[256] = {0};
-	snprintf(resp, sizeof(resp), "{\"type\":\"response\", \"code\":400, \"message\":\"json parse fail\"}");
+	NAT_WS_MESSAGE_ERROR_RESP(resp, 400, "json parse fail", "unknown session id");
+
 
 	char type[64] = {0};
 	char target[128] = {0};
+	char session_id[128] = {0};
 
 	cJSON* json = NULL;
 	json = cJSON_Parse(message);
     CHECK_POINTER(json, goto err);
+
+    CJSON_GET_STRING(json, "session_id", type, sizeof(type), goto err);
+	NAT_WS_MESSAGE_ERROR_RESP(resp, 400, "json parse fail", session_id);
 
     CJSON_GET_STRING(json, "type", type, sizeof(type), goto err);
 	CJSON_GET_STRING(json, "target", target, sizeof(target), goto err);
@@ -216,6 +276,7 @@ static void NatWsMessageProc(int id, const char* message, int size) {
 		pthread_mutex_lock(&kNatMng.mutex);
 		if (kNatMng.client_map.find(target) != kNatMng.client_map.end()) {
 			LOG_ERR("client [%s] exist !", target);
+			NAT_WS_MESSAGE_ERROR_RESP(resp, 400, "client exist", session_id);
 			snprintf(resp, sizeof(resp), "{\"type\":\"response\", \"code\":400, \"message\":\"client exist\"}");
 			goto err;
 		}
@@ -232,14 +293,14 @@ static void NatWsMessageProc(int id, const char* message, int size) {
 		
 		char decrypt_sdp[1024*4] = {0};
 		int ret = NatDecryptBase64(sdp, (unsigned char*)decrypt_sdp, sizeof(decrypt_sdp));
-		CHECK_LE(ret, 0, snprintf(resp, sizeof(resp), "{\"type\":\"response\", \"code\":400, \"message\":\"sdp decrypt fail\"}");goto err);
+		CHECK_LE(ret, 0, NAT_WS_MESSAGE_ERROR_RESP(resp, 400, "sdp decrypt fail", session_id);goto err);
 
 		pthread_mutex_lock(&kNatMng.mutex);
 		if (kNatMng.client_map.find(target) != kNatMng.client_map.end()) {
 			rtcSetRemoteDescription(kNatMng.client_map[target].pc, decrypt_sdp, type);
 		} else {
 			LOG_ERR("client [%s] not found !", target);
-			snprintf(resp, sizeof(resp), "{\"type\":\"response\", \"code\":400, \"message\":\"client not found\"}");
+			NAT_WS_MESSAGE_ERROR_RESP(resp, 400, "client not found", session_id);
 			goto unlock_err;
 		}
 		pthread_mutex_unlock(&kNatMng.mutex);
@@ -254,7 +315,7 @@ static void NatWsMessageProc(int id, const char* message, int size) {
 			rtcAddRemoteCandidate(kNatMng.client_map[target].pc, candidate, strlen(mid) > 0 ? mid : NULL);
 		} else {
 			LOG_ERR("client [%s] not found !", target);
-			snprintf(resp, sizeof(resp), "{\"type\":\"response\", \"code\":400, \"message\":\"client not found\"}");
+			NAT_WS_MESSAGE_ERROR_RESP(resp, 400, "client not found", session_id);
 			goto unlock_err;
 		}
 		pthread_mutex_unlock(&kNatMng.mutex);
@@ -263,13 +324,13 @@ static void NatWsMessageProc(int id, const char* message, int size) {
 		cJSON_free(json);
 		return ;
 	} else {
-		snprintf(resp, sizeof(resp), "{\"type\":\"response\", \"code\":400, \"message\":\"unknown type: %s\"}", type);
+		NAT_WS_MESSAGE_ERROR_RESP(resp, 400, "unknown type", session_id);
 		goto err;
 	}
 
 	cJSON_free(json);
 
-	snprintf(resp, sizeof(resp), "{\"type\":\"response\", \"code\":200, \"message\":\"success\"}");
+	NAT_WS_MESSAGE_ERROR_RESP(resp, 200, "success", session_id);
 	rtcSendMessage(id, resp, -1);
 	return ;
 unlock_err:
@@ -281,8 +342,9 @@ err:
 	rtcSendMessage(id, resp, -1);
 }
 
-static void NatDcMessageProc(int id, const char* message, int size) {
+static int NatDcMessageProc(const char* in, int in_size, char* out, int out_size) {
 	int fd = socket(AF_INET, SOCK_STREAM, 0);
+	CHECK_LE(fd, 0, return -1);
 
     struct sockaddr_in addr;
 	memset(&addr, 0, sizeof(struct sockaddr_in));
@@ -290,34 +352,52 @@ static void NatDcMessageProc(int id, const char* message, int size) {
     addr.sin_port = htons(8080);
 	addr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
-	if (connect(fd, (struct sockaddr*)&addr, sizeof(struct sockaddr)) < 0) {
-		perror("connect: ");
-		close(fd);
-		return ;
-	}
+	int ret = connect(fd, (struct sockaddr*)&addr, sizeof(struct sockaddr));
+	CHECK_LT(ret, 0, close(fd);return -1);
 
-	int len = send(fd, message, strlen(message), 0);
-	if (len <= 0) {
+	ret = send(fd, in, in_size, 0);
+	CHECK_LT(ret, 0, close(fd);return -1);
 
-	}
-
-	char buff[1024*64] = {0};
-	len = recv(fd, buff, sizeof(buff), 0);
-	if (len <= 0) {
-
-	}
+	ret = recv(fd, out, out_size, 0);
+	CHECK_LT(ret, 0, close(fd);return -1);
 
 	close(fd);
-	printf("buff: %d\n%s\n",  len, buff);
-	rtcSendMessage(id, buff, len);
+	return ret;
 }
 
 static void NatRtcMessageCb(int id, const char* message, int size, void* user_ptr) {
-	LOG_WRN("message:%s", message);
-	if (id == kNatMng.server_websocket) {
+	if (id == kNatMng.ws) {
 		NatWsMessageProc(id, message, size);
 	} else {
-		NatDcMessageProc(id, message, size);
+		char buff[1024*64] = {0};
+		int len = NatDcMessageProc(message, size <= 0 ? strlen(message) : size, buff, sizeof(buff));
+		if (len > 0) {
+			rtcSendMessage(id, buff, len);
+		}
+	}
+}
+
+static void* NatWebServerConnectMng(void* arg) {
+	while (1) {
+		if (kNatMng.ws_connect_status == 1) {
+			kNatMng.ws_connect_fail = 0;
+			sleep(5);
+			continue;
+		}
+
+		sleep(kNatMng.ws_connect_fail * 60);
+
+		if (kNatMng.ws != 0) {
+			rtcDeleteWebSocket(kNatMng.ws);
+		}
+
+		kNatMng.ws = rtcCreateWebSocket(NAT_SIGNALING_SERVER_URL);
+		rtcSetOpenCallback(kNatMng.ws, NatRtcOpenCb);
+		rtcSetClosedCallback(kNatMng.ws, NatRtcCloseCb);
+		rtcSetMessageCallback(kNatMng.ws, NatRtcMessageCb);
+
+		sleep(2);
+		kNatMng.ws_connect_fail++;
 	}
 }
 
@@ -361,6 +441,50 @@ static int NatCreatePath(const char* path) {
     return 0;
 }
 
+static int NatGetSerial() {
+	cJSON* users_json = (cJSON*)NatConfGetConfig("users");
+	CHECK_POINTER(users_json, return -1);
+	CHECK_BOOL(cJSON_IsArray(users_json), cJSON_free(users_json);return -1);
+
+	cJSON* item = cJSON_GetArrayItem(users_json, 0);
+
+	char username[64] = {0};
+	CJSON_GET_STRING(item, "username", username, sizeof(username), cJSON_free(users_json);return -1);
+	char password[64] = {0};
+	CJSON_GET_STRING(item, "password", password, sizeof(password), cJSON_free(users_json);return -1);
+	cJSON_free(users_json);
+
+	char auth[128+2] = {0};
+	snprintf(auth, sizeof(auth), "%s:%s", username, password);
+
+	char auth_enc[256] = {0};
+	NatEncryptBase64((unsigned char*)auth, strlen(auth), auth_enc, sizeof(auth_enc));
+
+	char header_auth[512] = {0};
+	snprintf(header_auth, sizeof(header_auth), "Authorization: Basic %s", auth_enc);
+
+	char* header[1] = {header_auth};
+
+	char res[1024*5] = {0};
+	int ret = HttpRequest("GET", "http://127.0.0.1:8080/dev_api/system_request?type=device_info", (const char**)header, 1, NULL, res, sizeof(res), 10*1000);
+	CHECK_LT(ret, 0, return -1);
+
+	cJSON* json = cJSON_Parse(res);
+	CHECK_POINTER(json, return -1);
+	
+	int code = 0;
+	char msg[256] = {0};
+	CJSON_GET_NUMBER(json, "code", code, sizeof(code), cJSON_free(json);return -1);
+	CJSON_GET_STRING(json, "message", msg, sizeof(msg), cJSON_free(json);return -1);
+	CHECK_EQ(code, 200, LOG_ERR("%s", msg);cJSON_free(json);return -1);
+
+	cJSON* info = cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(json, "data"), "device_info");
+	CHECK_POINTER(info, cJSON_free(json);return -1);
+	CJSON_GET_STRING(info, "serial_number", kNatMng.serial, sizeof(kNatMng.serial), cJSON_free(json);return -1);
+	cJSON_free(json);
+	return 0;
+}
+
 int NatInit(NatInitialInfo* info) {
 	char file_path[256] = {0};
 	const char* log_path = (info == NULL || info->log_path == NULL) ? NAT_DEFAULT_LOGS_PATH : info->log_path;
@@ -370,18 +494,16 @@ int NatInit(NatInitialInfo* info) {
 	snprintf(file_path, sizeof(file_path), "%s/nat.log", log_path);
 	LogInit(file_path, 512*1024, 3, 3);
 
-	rtcInitLogger(RTC_LOG_INFO, NatRtcLogCb);
+	rtcInitLogger(RTC_LOG_WARNING, NatRtcLogCb);
 
-	snprintf(kNatMng.serial, sizeof(kNatMng.serial), "sn1234567890");
+	NatConfInit((info == NULL || info->conf_path == NULL) ? NAT_DEFAULT_CONFS_PATH : info->conf_path);
+	NatGetSerial();
 
-	kNatMng.server_websocket = rtcCreateWebSocket(NAT_SIGNALING_SERVER_URL);
-	rtcSetOpenCallback(kNatMng.server_websocket, NatRtcOpenCb);
-	rtcSetClosedCallback(kNatMng.server_websocket, NatRtcCloseCb);
-	rtcSetMessageCallback(kNatMng.server_websocket, NatRtcMessageCb);
+	pthread_create(&kNatMng.pthread_id, NULL, NatWebServerConnectMng, NULL);
 
 	return 0;
 }
 
 void NatUnInit() {
-
+	
 }
