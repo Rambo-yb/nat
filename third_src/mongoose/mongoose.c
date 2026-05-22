@@ -2855,7 +2855,7 @@ void mg_http_serve_file(struct mg_connection *c, struct mg_http_message *hm,
       c->is_resp = 0;
       mg_fs_close(fd);
     } else {
-      // Track to-be-sent content length at the end of c->data, aligned
+      // NatTrack to-be-sent content length at the end of c->data, aligned
       size_t *clp = (size_t *) &c->data[(sizeof(c->data) - sizeof(size_t)) /
                                         sizeof(size_t) * sizeof(size_t)];
       c->pfn = static_cb;

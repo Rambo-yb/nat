@@ -7,6 +7,7 @@
 #include <sys/types.h>
 #include <map>
 #include <string>
+#include <vector>
 
 #include "rtc/rtc.h"
 #include "openssl/pem.h"
@@ -18,6 +19,7 @@
 
 #include "nat.h"
 #include "nat_conf.h"
+#include "nat_media.h"
 
 #define NAT_LIB_VERSION ("V1.0.0")
 #define NAT_DEFAULT_LOGS_PATH "/data/logs"
@@ -26,9 +28,12 @@
 // #define NAT_SIGNALING_SERVER_URL "ws://10.42.0.201:8765"
 #define NAT_SIGNALING_SERVER_URL "ws://8.136.196.77:8765"
 
+#define NAT_MAX_CHN_NUM 2
+
 typedef struct {
 	int pc;
 	int dc;
+	int tr[NAT_MAX_CHN_NUM][2];
 }NatClientInfo;
 
 typedef struct {
@@ -36,11 +41,16 @@ typedef struct {
 	int ws;
 	int ws_connect_status;
 	int ws_connect_fail;
+	pthread_t pthread_server_mng;
+
 	std::map<std::string, NatClientInfo> client_map;
-    pthread_mutex_t mutex;
-	pthread_t pthread_id;
+    pthread_mutex_t client_mutex;
+
+	pthread_t pthread_media_proc;
+    pthread_mutex_t media_mutex;
+	std::map<int, NatMediaSession*> media_map; 
 }NatMng;
-static NatMng kNatMng = {.mutex = PTHREAD_MUTEX_INITIALIZER};
+static NatMng kNatMng = {.client_mutex = PTHREAD_MUTEX_INITIALIZER};
 
 static void NatRtcMessageCb(int id, const char* message, int size, void* user_ptr);
 static void NatRtcCloseCb(int id, void* user_ptr);
@@ -102,7 +112,7 @@ static int NatUuid(char* uuid, int size) {
 
 static void NatRtcDescriptionCb(int pc, const char *sdp, const char *type, void *ptr) {
 	LOG_INFO("Description %s :\n %s", type, sdp);
-	pthread_mutex_lock(&kNatMng.mutex);
+	pthread_mutex_lock(&kNatMng.client_mutex);
 	for(auto &i : kNatMng.client_map ) {
 		if (i.second.pc == pc) {
 			cJSON* json = cJSON_CreateObject();
@@ -129,12 +139,12 @@ static void NatRtcDescriptionCb(int pc, const char *sdp, const char *type, void 
 			break;
 		}
 	}
-	pthread_mutex_unlock(&kNatMng.mutex);
+	pthread_mutex_unlock(&kNatMng.client_mutex);
 }
 
 static void NatRtcCandidateCb(int pc, const char *cand, const char *mid, void *ptr) {
 	LOG_INFO("Candidate : %s [%s]", cand, mid);
-	pthread_mutex_lock(&kNatMng.mutex);
+	pthread_mutex_lock(&kNatMng.client_mutex);
 	for(auto &i : kNatMng.client_map ) {
 		if (i.second.pc == pc) {
 			cJSON* json = cJSON_CreateObject();
@@ -159,65 +169,61 @@ static void NatRtcCandidateCb(int pc, const char *cand, const char *mid, void *p
 			break;
 		}
 	}
-	pthread_mutex_unlock(&kNatMng.mutex);
+	pthread_mutex_unlock(&kNatMng.client_mutex);
 }
 
 static void NatRtcStateChangeCb(int pc, rtcState state, void *ptr) {
 	LOG_INFO("State : %d", state);
 	if (state == RTC_CLOSED) {
-		pthread_mutex_lock(&kNatMng.mutex);
+		pthread_mutex_lock(&kNatMng.client_mutex);
 		for(auto &i : kNatMng.client_map ) {
 			if (i.second.pc == pc) {
+				for(int j = 0; j < NAT_MAX_CHN_NUM; j++) {
+					if (i.second.tr[j][0] != 0) {
+						pthread_mutex_lock(&kNatMng.media_mutex);
+						kNatMng.media_map[j]->removeTrInstance(i.second.tr[j][0]);
+						pthread_mutex_unlock(&kNatMng.media_mutex);
+						rtcDeleteTrack(i.second.tr[j][0]);
+					}
+					if (i.second.tr[j][1] != 0){
+						pthread_mutex_lock(&kNatMng.media_mutex);
+						kNatMng.media_map[j]->removeTrInstance(i.second.tr[j][1]);
+						pthread_mutex_unlock(&kNatMng.media_mutex);
+						rtcDeleteTrack(i.second.tr[j][1]);
+					}
+				}
+				pthread_mutex_unlock(&kNatMng.media_mutex);
 				rtcDeleteDataChannel(i.second.dc);
 				rtcDeletePeerConnection(i.second.pc);
 				kNatMng.client_map.erase(i.first);
 				break;
 			}
 		}
-		pthread_mutex_unlock(&kNatMng.mutex);
+		pthread_mutex_unlock(&kNatMng.client_mutex);
 	}
-}
-
-static void NatRtcIceStateChangeCb(int pc, rtcIceState state, void *ptr) {
-	LOG_INFO("Ice state : %d", state);
-}
-
-static void NatRtcGatheringStateCb(int pc, rtcGatheringState state, void *ptr) {
-	LOG_INFO("Gathering state : %d", state);
-}
-
-static void RTC_API dataChannelCallback(int pc, int dc, void *ptr) {
-	pthread_mutex_lock(&kNatMng.mutex);
-	for(auto &i : kNatMng.client_map ) {
-		if (i.second.pc == pc) {
-			i.second.dc = dc;
-			rtcSetClosedCallback(dc, NatRtcCloseCb);
-			rtcSetMessageCallback(dc, NatRtcMessageCb);
-			break;
-		}
-	}
-	pthread_mutex_unlock(&kNatMng.mutex);
 }
 
 static void NatRtcOpenCb(int id, void* user_ptr) {
-	kNatMng.ws_connect_status = 1;
+	if (id == kNatMng.ws) {
+		kNatMng.ws_connect_status = 1;
 
-	cJSON* json = cJSON_CreateObject();
-	CHECK_POINTER(json, return );
+		cJSON* json = cJSON_CreateObject();
+		CHECK_POINTER(json, return );
 
-	char session[64] = {0};
-	NatUuid(session, sizeof(session));
+		char session[64] = {0};
+		NatUuid(session, sizeof(session));
 
-	CJSON_SET_STRING(json, "type", "register", cJSON_free(json);return );
-	CJSON_SET_STRING(json, "session_id", session, cJSON_free(json);return );
-	CJSON_SET_STRING(json, "serial", kNatMng.serial, cJSON_free(json);return );
+		CJSON_SET_STRING(json, "type", "register", cJSON_free(json);return );
+		CJSON_SET_STRING(json, "session_id", session, cJSON_free(json);return );
+		CJSON_SET_STRING(json, "serial", kNatMng.serial, cJSON_free(json);return );
 
-	char* buff = cJSON_PrintUnformatted(json);
-    CHECK_POINTER(buff, cJSON_free(json);return );
+		char* buff = cJSON_PrintUnformatted(json);
+		CHECK_POINTER(buff, cJSON_free(json);return );
 
-	rtcSendMessage(id, buff, -1);
-	free(buff);
-	cJSON_free(json);
+		rtcSendMessage(id, buff, -1);
+		free(buff);
+		cJSON_free(json);
+	}
 }
 
 static void NatRtcCloseCb(int id, void* user_ptr) {
@@ -241,10 +247,28 @@ static void NatPeerConnection(NatClientInfo* cli_info) {
 	rtcSetLocalDescriptionCallback(cli_info->pc, NatRtcDescriptionCb);
 	rtcSetLocalCandidateCallback(cli_info->pc, NatRtcCandidateCb);
 	rtcSetStateChangeCallback(cli_info->pc, NatRtcStateChangeCb);
-	// rtcSetIceStateChangeCallback(cli_info->pc, NatRtcIceStateChangeCb);
-	// rtcSetGatheringStateChangeCallback(cli_info->pc, NatRtcGatheringStateCb);
-	rtcSetDataChannelCallback(cli_info->pc, dataChannelCallback);	
 
+	pthread_mutex_lock(&kNatMng.media_mutex);
+	for(auto &i : kNatMng.media_map) {
+		for (int j = 0; j < 2; j++) {
+			NatMediaSession::TrackId track_id = (j == 0) ? NatMediaSession::TrackId0 : NatMediaSession::TrackId1;
+			if(i.second->isSupport(track_id)) {
+				std::string sdp = i.second->getDescription(track_id);
+				cli_info->tr[i.first][j] = rtcAddTrack(cli_info->pc, sdp.c_str());
+				rtcSetOpenCallback(cli_info->tr[i.first][j], NatRtcOpenCb);
+				rtcSetClosedCallback(cli_info->tr[i.first][j], NatRtcCloseCb);
+				rtcSetMessageCallback(cli_info->tr[i.first][j], NatRtcMessageCb);
+
+				i.second->addTrInstance(track_id, cli_info->tr[i.first][j]);
+			}
+		}
+	}
+	pthread_mutex_unlock(&kNatMng.media_mutex);
+
+	cli_info->dc = rtcCreateDataChannel(cli_info->pc, "chat");
+	rtcSetOpenCallback(cli_info->dc, NatRtcOpenCb);
+	rtcSetClosedCallback(cli_info->dc, NatRtcCloseCb);
+	rtcSetMessageCallback(cli_info->dc, NatRtcMessageCb);
 }
 
 #define NAT_WS_MESSAGE_ERROR_RESP(r, c, m, s) \
@@ -273,20 +297,20 @@ static void NatWsMessageProc(int id, const char* message, int size) {
 		NatClientInfo cli_info;
 		memset(&cli_info, 0, sizeof(NatClientInfo));
 
-		pthread_mutex_lock(&kNatMng.mutex);
+		pthread_mutex_lock(&kNatMng.client_mutex);
 		if (kNatMng.client_map.find(target) != kNatMng.client_map.end()) {
 			LOG_ERR("client [%s] exist !", target);
 			NAT_WS_MESSAGE_ERROR_RESP(resp, 400, "client exist", session_id);
 			snprintf(resp, sizeof(resp), "{\"type\":\"response\", \"code\":400, \"message\":\"client exist\"}");
 			goto err;
 		}
-		pthread_mutex_unlock(&kNatMng.mutex);
+		pthread_mutex_unlock(&kNatMng.client_mutex);
 
-		NatPeerConnection(&cli_info);
-
-		pthread_mutex_lock(&kNatMng.mutex);
+		pthread_mutex_lock(&kNatMng.client_mutex);
 		kNatMng.client_map.insert({target, cli_info});
-		pthread_mutex_unlock(&kNatMng.mutex);
+		pthread_mutex_unlock(&kNatMng.client_mutex);
+
+		NatPeerConnection(&kNatMng.client_map[target]);
 	} else if (strcmp(type, "offer") == 0 || strcmp(type, "answer") == 0) {
 		char sdp[1024*4] = {0};
 	    CJSON_GET_STRING(json, "sdp", sdp, sizeof(sdp), goto err);
@@ -295,7 +319,7 @@ static void NatWsMessageProc(int id, const char* message, int size) {
 		int ret = NatDecryptBase64(sdp, (unsigned char*)decrypt_sdp, sizeof(decrypt_sdp));
 		CHECK_LE(ret, 0, NAT_WS_MESSAGE_ERROR_RESP(resp, 400, "sdp decrypt fail", session_id);goto err);
 
-		pthread_mutex_lock(&kNatMng.mutex);
+		pthread_mutex_lock(&kNatMng.client_mutex);
 		if (kNatMng.client_map.find(target) != kNatMng.client_map.end()) {
 			rtcSetRemoteDescription(kNatMng.client_map[target].pc, decrypt_sdp, type);
 		} else {
@@ -303,14 +327,14 @@ static void NatWsMessageProc(int id, const char* message, int size) {
 			NAT_WS_MESSAGE_ERROR_RESP(resp, 400, "client not found", session_id);
 			goto unlock_err;
 		}
-		pthread_mutex_unlock(&kNatMng.mutex);
+		pthread_mutex_unlock(&kNatMng.client_mutex);
 	} else if (strcmp(type, "candidate") == 0) {
 		char mid[16] = {0};
 		char candidate[256] = {0};
 	    CJSON_GET_STRING(json, "candidate", candidate, sizeof(candidate), goto err);
 	    CJSON_GET_STRING(json, "mid", mid, sizeof(mid), goto err);
 
-		pthread_mutex_lock(&kNatMng.mutex);
+		pthread_mutex_lock(&kNatMng.client_mutex);
 		if (kNatMng.client_map.find(target) != kNatMng.client_map.end()) {
 			rtcAddRemoteCandidate(kNatMng.client_map[target].pc, candidate, strlen(mid) > 0 ? mid : NULL);
 		} else {
@@ -318,7 +342,7 @@ static void NatWsMessageProc(int id, const char* message, int size) {
 			NAT_WS_MESSAGE_ERROR_RESP(resp, 400, "client not found", session_id);
 			goto unlock_err;
 		}
-		pthread_mutex_unlock(&kNatMng.mutex);
+		pthread_mutex_unlock(&kNatMng.client_mutex);
 	} else if (strcmp(type, "response") == 0) {
 		// todo
 		cJSON_free(json);
@@ -334,7 +358,7 @@ static void NatWsMessageProc(int id, const char* message, int size) {
 	rtcSendMessage(id, resp, -1);
 	return ;
 unlock_err:
-	pthread_mutex_unlock(&kNatMng.mutex);
+	pthread_mutex_unlock(&kNatMng.client_mutex);
 err:
 	if (json != NULL) {
 		cJSON_free(json);
@@ -366,6 +390,7 @@ static int NatDcMessageProc(const char* in, int in_size, char* out, int out_size
 }
 
 static void NatRtcMessageCb(int id, const char* message, int size, void* user_ptr) {
+	LOG_DEBUG("%*s", size, message);
 	if (id == kNatMng.ws) {
 		NatWsMessageProc(id, message, size);
 	} else {
@@ -374,6 +399,33 @@ static void NatRtcMessageCb(int id, const char* message, int size, void* user_pt
 		if (len > 0) {
 			rtcSendMessage(id, buff, len);
 		}
+	}
+}
+
+static void* NatMediaProc(void* arg) {
+	while (1) {
+		for(int i = 0; i < NAT_MAX_CHN_NUM; i++) {
+			NatAvFrame frame;
+			frame.m_frame_size = NatMediaVideoPop(i, frame.m_buffer, NAT_FRAME_MAX_SIZE, &frame.m_pts);
+			if (frame.m_frame_size > 0) {
+				frame.m_frame = frame.m_buffer;
+				
+				pthread_mutex_lock(&kNatMng.media_mutex);
+				kNatMng.media_map[i]->frameHandle(NatMediaSession::TrackId0, &frame);
+				pthread_mutex_unlock(&kNatMng.media_mutex);
+			}
+
+			frame.Clear();
+			frame.m_frame_size = NatMediaAudioPop(i, frame.m_buffer, NAT_FRAME_MAX_SIZE, &frame.m_pts);
+			if (frame.m_frame_size > 0) {
+				frame.m_frame = frame.m_buffer;
+				pthread_mutex_lock(&kNatMng.media_mutex);
+				kNatMng.media_map[i]->frameHandle(NatMediaSession::TrackId1, &frame);
+				pthread_mutex_unlock(&kNatMng.media_mutex);
+			}	
+		}
+
+		usleep(1*1000);
 	}
 }
 
@@ -494,16 +546,88 @@ int NatInit(NatInitialInfo* info) {
 	snprintf(file_path, sizeof(file_path), "%s/nat.log", log_path);
 	LogInit(file_path, 512*1024, 3, 3);
 
-	rtcInitLogger(RTC_LOG_WARNING, NatRtcLogCb);
+	rtcInitLogger(RTC_LOG_VERBOSE, NatRtcLogCb);
 
 	NatConfInit((info == NULL || info->conf_path == NULL) ? NAT_DEFAULT_CONFS_PATH : info->conf_path);
 	NatGetSerial();
 
-	pthread_create(&kNatMng.pthread_id, NULL, NatWebServerConnectMng, NULL);
+	pthread_create(&kNatMng.pthread_server_mng, NULL, NatWebServerConnectMng, NULL);
+
+	pthread_create(&kNatMng.pthread_media_proc, NULL, NatMediaProc, NULL);
 
 	return 0;
 }
 
 void NatUnInit() {
-	
+    if (kNatMng.pthread_media_proc) {
+        pthread_cancel(kNatMng.pthread_media_proc);
+        pthread_join(kNatMng.pthread_media_proc, NULL);
+    }
+
+    if (kNatMng.pthread_server_mng) {
+        pthread_cancel(kNatMng.pthread_server_mng);
+        pthread_join(kNatMng.pthread_server_mng, NULL);
+    }
+
+	NatConfUninit();
+
+	if (kNatMng.ws != 0) {
+		rtcDeleteWebSocket(kNatMng.ws);
+	}
+
+	for(auto &i : kNatMng.client_map ) {
+		rtcDeleteDataChannel(i.second.dc);
+		rtcDeletePeerConnection(i.second.pc);
+		kNatMng.client_map.erase(i.first);
+	}
+
+	for (auto &i : kNatMng.media_map) {
+		delete i.second;
+		kNatMng.media_map.erase(i.first);
+	}
+}
+
+int NatSendMedia(int id, unsigned char *data, int size) {
+	if (rtcIsOpen(id)) {
+		rtcSendMessage(id, (const char*)data, size);
+	}
+	return 0;
+}
+
+void NatStreamingRegister(NatStreamingRegisterInfo* info, unsigned int size) {
+	CHECK_LT(NAT_MAX_CHN_NUM, size, return );
+
+	for(int i = 0; i < size; i++) {
+		NatMediaSession* session = new NatMediaSession(info[i].chn);
+		if (info[i].video_info.use) {
+			NatRtpSink* sink = NULL;
+			if (info[i].video_info.video_type == NAT_VIDEO_H264) {
+				sink = new NatH264RtpSink(info[i].video_info.fps);
+			} else if (info[i].video_info.video_type == NAT_VIDEO_H265) {
+				sink = new NatH265RtpSink(info[i].video_info.fps);
+			}
+			session->addRtpSink(NatMediaSession::TrackId0, sink);
+		}
+
+		if (info[i].audio_info.use) {
+			NatRtpSink* sink = NULL;
+			if (info[i].audio_info.audio_type == NAT_AUDIO_AAC) {
+				sink = new NatAACRtpSink(info[i].audio_info.sample_rate, info[i].audio_info.channels);
+			} else if (info[i].audio_info.audio_type == NAT_AUDIO_G711A) {
+				sink = new NatG711aRtpSink(info[i].audio_info.sample_rate, info[i].audio_info.channels);
+			}
+			session->addRtpSink(NatMediaSession::TrackId1, sink);
+		}
+		session->setSendPacketCb(NatSendMedia);
+		kNatMng.media_map.insert({info[i].chn, session});
+	}
+}
+
+int NatPushStream(NatPushStreamInfo* info) {
+	if (info->frame_type == NAT_FRAME_VIDEO) {
+		return NatMediaVideoPush(info->chn, info->buff, info->size, info->pts);
+	} else if (info->frame_type == NAT_FRAME_AUDIO) {
+		return NatMediaAudioPush(info->chn, info->buff, info->size, info->pts);
+	}
+	return 0;
 }

@@ -51,6 +51,16 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/_install/openssl/include)
 find_library(SSL_LIB ssl PATHS ${CMAKE_CURRENT_SOURCE_DIR}/_install/openssl/lib)
 find_library(CRYPTO_LIB crypto PATHS ${CMAKE_CURRENT_SOURCE_DIR}/_install/openssl/lib)
 
+if (MEDIA_TYPE STREQUAL "ffmpeg")
+add_definitions(-DFFMPEG_ENABLE)
+
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/_install/x264/include)
+link_directories(${CMAKE_CURRENT_SOURCE_DIR}/_install/x264/lib)
+
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/_install/ffmpeg/include)
+link_directories(${CMAKE_CURRENT_SOURCE_DIR}/_install/ffmpeg/lib)
+endif()
+
 add_library(nat_static STATIC ${SRC})
 set_target_properties(nat_static PROPERTIES OUTPUT_NAME "nat")
 add_library(nat SHARED ${SRC})
@@ -66,7 +76,12 @@ target_link_libraries(nat_static PRIVATE
 
 add_executable(nat_test ${MAIN_SRC})
 target_link_libraries(nat_test nat pthread m dl stdc++)
+
+if (MEDIA_TYPE STREQUAL "ffmpeg")
+target_link_libraries(nat_test avdevice avfilter avcodec avformat avutil postproc swresample swscale x264)
+endif()
+
 install(TARGETS nat_test DESTINATION bin)
 install(TARGETS nat nat_static DESTINATION lib)
 install(DIRECTORY include/ DESTINATION include)
-install(FILES example/main.c DESTINATION example)
+# install(FILES example/main.c DESTINATION example)
