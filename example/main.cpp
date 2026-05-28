@@ -338,7 +338,7 @@ static void* VideoChn1Push(void* arg) {
 }
 
 static int VideoChn1Init() {
-    FILE* fp = fopen("1080P.h265", "r");
+    FILE* fp = fopen("big_bit_video.h264", "r");
     // FILE* fp = fopen("recordfile01.h264", "r");
     if (fp == NULL) {
         return -1;
@@ -395,7 +395,7 @@ int main() {
 		// },
 		{
 			.chn = 0, 
-			.video_info = {.use = 1, .video_type = NAT_VIDEO_H265, .fps = 25}
+			.video_info = {.use = 1, .video_type = NAT_VIDEO_H264, .fps = 25}
 		}
 	};
 	NatStreamingRegister(info, sizeof(info)/sizeof(NatStreamingRegisterInfo));

@@ -17,6 +17,8 @@
 #include "check_common.h"
 #include "http_client.h"
 
+#include "net/UsageEnvironment.h"
+
 #include "nat.h"
 #include "nat_conf.h"
 #include "nat_media.h"
@@ -48,9 +50,12 @@ typedef struct {
 
 	pthread_t pthread_media_proc;
     pthread_mutex_t media_mutex;
-	std::map<int, NatMediaSession*> media_map; 
+	std::map<int, NatMediaSession*> media_map;
+	EventScheduler* scheduler;
+	ThreadPool* thread_pool;
+	UsageEnvironment* env;
 }NatMng;
-static NatMng kNatMng = {.client_mutex = PTHREAD_MUTEX_INITIALIZER};
+static NatMng kNatMng = {.client_mutex = PTHREAD_MUTEX_INITIALIZER, .media_mutex = PTHREAD_MUTEX_INITIALIZER};
 
 static void NatRtcMessageCb(int id, const char* message, int size, void* user_ptr);
 static void NatRtcCloseCb(int id, void* user_ptr);
@@ -108,6 +113,14 @@ static int NatUuid(char* uuid, int size) {
              buff[8], buff[9], buff[10], buff[11],
              buff[12], buff[13], buff[14], buff[15]);
 	return 0;
+}
+
+extern void NatMediaMutexLock() {
+	pthread_mutex_lock(&kNatMng.media_mutex);
+}
+
+extern void NatMediaMutexUnlock() {
+	pthread_mutex_unlock(&kNatMng.media_mutex);
 }
 
 static void NatRtcDescriptionCb(int pc, const char *sdp, const char *type, void *ptr) {
@@ -302,7 +315,7 @@ static void NatWsMessageProc(int id, const char* message, int size) {
 			LOG_ERR("client [%s] exist !", target);
 			NAT_WS_MESSAGE_ERROR_RESP(resp, 400, "client exist", session_id);
 			snprintf(resp, sizeof(resp), "{\"type\":\"response\", \"code\":400, \"message\":\"client exist\"}");
-			goto err;
+			goto unlock_err;
 		}
 		pthread_mutex_unlock(&kNatMng.client_mutex);
 
@@ -390,7 +403,7 @@ static int NatDcMessageProc(const char* in, int in_size, char* out, int out_size
 }
 
 static void NatRtcMessageCb(int id, const char* message, int size, void* user_ptr) {
-	LOG_DEBUG("%*s", size, message);
+	LOG_INFO("%*s", size, message);
 	if (id == kNatMng.ws) {
 		NatWsMessageProc(id, message, size);
 	} else {
@@ -403,30 +416,8 @@ static void NatRtcMessageCb(int id, const char* message, int size, void* user_pt
 }
 
 static void* NatMediaProc(void* arg) {
-	while (1) {
-		for(int i = 0; i < NAT_MAX_CHN_NUM; i++) {
-			NatAvFrame frame;
-			frame.m_frame_size = NatMediaVideoPop(i, frame.m_buffer, NAT_FRAME_MAX_SIZE, &frame.m_pts);
-			if (frame.m_frame_size > 0) {
-				frame.m_frame = frame.m_buffer;
-				
-				pthread_mutex_lock(&kNatMng.media_mutex);
-				kNatMng.media_map[i]->frameHandle(NatMediaSession::TrackId0, &frame);
-				pthread_mutex_unlock(&kNatMng.media_mutex);
-			}
-
-			frame.Clear();
-			frame.m_frame_size = NatMediaAudioPop(i, frame.m_buffer, NAT_FRAME_MAX_SIZE, &frame.m_pts);
-			if (frame.m_frame_size > 0) {
-				frame.m_frame = frame.m_buffer;
-				pthread_mutex_lock(&kNatMng.media_mutex);
-				kNatMng.media_map[i]->frameHandle(NatMediaSession::TrackId1, &frame);
-				pthread_mutex_unlock(&kNatMng.media_mutex);
-			}	
-		}
-
-		usleep(1*1000);
-	}
+	kNatMng.env->scheduler()->loop();
+	return NULL;
 }
 
 static void* NatWebServerConnectMng(void* arg) {
@@ -553,8 +544,13 @@ int NatInit(NatInitialInfo* info) {
 
 	pthread_create(&kNatMng.pthread_server_mng, NULL, NatWebServerConnectMng, NULL);
 
+	kNatMng.scheduler = EventScheduler::createNew(EventScheduler::POLLER_SELECT);
+	kNatMng.thread_pool = ThreadPool::createNew(2);
+    kNatMng.env = UsageEnvironment::createNew(kNatMng.scheduler, kNatMng.thread_pool);
+
 	pthread_create(&kNatMng.pthread_media_proc, NULL, NatMediaProc, NULL);
 
+    LOG_INFO("rtsp server init success! compile time:%s %s, ver:%s", __DATE__, __TIME__, NAT_LIB_VERSION);
 	return 0;
 }
 
@@ -576,6 +572,16 @@ void NatUnInit() {
 	}
 
 	for(auto &i : kNatMng.client_map ) {
+		for(int j = 0; j < NAT_MAX_CHN_NUM; j++) {
+			if (i.second.tr[j][0] != 0) {
+				kNatMng.media_map[j]->removeTrInstance(i.second.tr[j][0]);
+				rtcDeleteTrack(i.second.tr[j][0]);
+			}
+			if (i.second.tr[j][1] != 0){
+				kNatMng.media_map[j]->removeTrInstance(i.second.tr[j][1]);
+				rtcDeleteTrack(i.second.tr[j][1]);
+			}
+		}
 		rtcDeleteDataChannel(i.second.dc);
 		rtcDeletePeerConnection(i.second.pc);
 		kNatMng.client_map.erase(i.first);
@@ -598,23 +604,25 @@ void NatStreamingRegister(NatStreamingRegisterInfo* info, unsigned int size) {
 	CHECK_LT(NAT_MAX_CHN_NUM, size, return );
 
 	for(int i = 0; i < size; i++) {
-		NatMediaSession* session = new NatMediaSession(info[i].chn);
+		NatMediaSession* session = NatMediaSession::createNew(info[i].chn);
 		if (info[i].video_info.use) {
+			MediaSource* source = VideoSource::createNew(kNatMng.env, info[i].chn, info[i].video_info.fps);
 			NatRtpSink* sink = NULL;
 			if (info[i].video_info.video_type == NAT_VIDEO_H264) {
-				sink = new NatH264RtpSink(info[i].video_info.fps);
+				sink = new NatH264RtpSink(kNatMng.env, source);
 			} else if (info[i].video_info.video_type == NAT_VIDEO_H265) {
-				sink = new NatH265RtpSink(info[i].video_info.fps);
+				sink = new NatH265RtpSink(kNatMng.env, source);
 			}
 			session->addRtpSink(NatMediaSession::TrackId0, sink);
 		}
 
 		if (info[i].audio_info.use) {
+			MediaSource* source = AudioSource::createNew(kNatMng.env, info[i].chn);
 			NatRtpSink* sink = NULL;
 			if (info[i].audio_info.audio_type == NAT_AUDIO_AAC) {
-				sink = new NatAACRtpSink(info[i].audio_info.sample_rate, info[i].audio_info.channels);
+				sink = new NatAACRtpSink(kNatMng.env, source, info[i].audio_info.sample_rate, info[i].audio_info.channels);
 			} else if (info[i].audio_info.audio_type == NAT_AUDIO_G711A) {
-				sink = new NatG711aRtpSink(info[i].audio_info.sample_rate, info[i].audio_info.channels);
+				sink = new NatG711aRtpSink(kNatMng.env, source, info[i].audio_info.sample_rate, info[i].audio_info.channels);
 			}
 			session->addRtpSink(NatMediaSession::TrackId1, sink);
 		}

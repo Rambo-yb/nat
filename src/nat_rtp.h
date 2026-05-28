@@ -5,27 +5,9 @@
 #include <string>
 #include <queue>
 
-#define NAT_FRAME_MAX_SIZE (1024*500)
+#include "nat_media_source.h"
 
-class NatAvFrame
-{
-public:
-    NatAvFrame() :
-        m_buffer(new uint8_t[NAT_FRAME_MAX_SIZE]),
-        m_frame_size(0)
-    { }
-
-    ~NatAvFrame()
-    { delete m_buffer; }
-
-	void Clear() {memset(m_buffer, 0, NAT_FRAME_MAX_SIZE); m_frame_size = 0;}
-
-    uint8_t* m_buffer;
-    uint8_t* m_frame;
-    int m_frame_size;
-	uint64_t m_pts;
-};
-
+#include "net/UsageEnvironment.h"
 
 #define NAT_RTP_HEADER_SIZE         12
 #define NAT_RTP_MAX_PKT_SIZE        1400
@@ -87,13 +69,20 @@ class NatRtpSink {
 public:
 	typedef int (*SendPacketCallback)(void* arg1, void* arg2, void* packet);
 
-	NatRtpSink(int payload_type);
+	NatRtpSink(UsageEnvironment* env, MediaSource* media_source, int payload_type);
 	void setSendFrameCallback(SendPacketCallback cb, void* arg1, void* arg2);
 
-    int sendRtpPacket(NatRtpPacket* packet, uint16_t seq, uint32_t ts, uint8_t marker);
-	virtual void handleFrame(NatAvFrame* frame) = 0;
 	virtual std::string getDescription() = 0;
 protected:
+	virtual void handleFrame(NatAvFrame* frame) = 0;
+    int sendRtpPacket(NatRtpPacket* packet, uint16_t seq, uint32_t ts, uint8_t marker);
+    void start(int ms);
+    void stop();
+private:
+    static void timeoutCallback(void*);
+protected:
+    UsageEnvironment* m_env;
+    MediaSource* m_media_source;
 	SendPacketCallback m_send_packet_cb;
     void* m_arg1;
     void* m_arg2;
@@ -108,7 +97,6 @@ protected:
     uint32_t m_timestamp;
     uint32_t m_ssrc;
 
-protected:
 	struct NatRtpData {
 		NatRtpHeader rtp_header;
 		uint8_t frame[1500];
@@ -116,13 +104,17 @@ protected:
 	};
 	
 	std::queue<NatRtpData> m_rtp_queue;
-
+private:
+    TimerEvent* m_timer_event;
+    Timer::TimerId m_timer_id;
 };
 
 
 class NatH264RtpSink : public NatRtpSink {
 public:
-	NatH264RtpSink(int fps);
+    static NatH264RtpSink* createNew(UsageEnvironment* env, MediaSource* media_source);
+
+	NatH264RtpSink(UsageEnvironment* env, MediaSource* media_source);
 	virtual ~NatH264RtpSink();
 	void handleFrame(NatAvFrame* frame);
 	std::string getDescription();
@@ -134,7 +126,9 @@ private:
 
 class NatH265RtpSink : public NatRtpSink {
 public:
-	NatH265RtpSink(int fps);
+    static NatH265RtpSink* createNew(UsageEnvironment* env, MediaSource* media_source);
+
+	NatH265RtpSink(UsageEnvironment* env, MediaSource* media_source);
 	virtual ~NatH265RtpSink();
 	void handleFrame(NatAvFrame* frame);
 	std::string getDescription();
@@ -146,7 +140,9 @@ private:
 
 class NatAACRtpSink : public NatRtpSink {
 public:
-	NatAACRtpSink(int sample_rate, int channels);
+	static NatAACRtpSink* createNew(UsageEnvironment* env, MediaSource* media_source, int sample_rate, int channels);
+
+	NatAACRtpSink(UsageEnvironment* env, MediaSource* media_source, int sample_rate, int channels);
 	virtual ~NatAACRtpSink();
 	void handleFrame(NatAvFrame* frame);
 	std::string getDescription();
@@ -158,7 +154,9 @@ private:
 
 class NatG711aRtpSink : public NatRtpSink {
 public:
-	NatG711aRtpSink(int sample_rate, int channels);
+	static NatG711aRtpSink* createNew(UsageEnvironment* env, MediaSource* media_source, int sample_rate, int channels);
+
+	NatG711aRtpSink(UsageEnvironment* env, MediaSource* media_source, int sample_rate, int channels);
 	virtual ~NatG711aRtpSink();
 	void handleFrame(NatAvFrame* frame);
 	std::string getDescription();

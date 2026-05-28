@@ -5,11 +5,19 @@
 #include <string.h>
 #include <stdio.h>
 
-#include "nat_rtp.h"
+#include "base/New.h"
 
-NatRtpSink::NatRtpSink(int payload_type) :
+#include "nat_rtp.h"
+#include "log.h"
+
+NatRtpSink::NatRtpSink(UsageEnvironment* env, MediaSource* media_source, int payload_type) :
+	m_env(env), m_media_source(media_source),
 	m_csrc_len(0), m_extension(0), m_padding(0), m_version(2), m_payload_type(payload_type), 
-	m_marker(0), m_seq(0), m_timestamp(0) {
+	m_marker(0), m_seq(0), m_timestamp(0) 
+{
+    m_timer_event = TimerEvent::createNew(this);
+    m_timer_event->setTimeoutCallback(timeoutCallback);
+
 	m_ssrc = rand();
 }
 
@@ -38,10 +46,52 @@ int NatRtpSink::sendRtpPacket(NatRtpPacket* packet, uint16_t seq, uint32_t ts, u
 	return -1;
 }
 
-
-NatH264RtpSink::NatH264RtpSink(int fps) : 
-	NatRtpSink(96), m_clock_rate(90000), m_fps(fps)
+void NatRtpSink::start(int ms)
 {
+    m_timer_id = m_env->scheduler()->addTimedEventRunEvery(m_timer_event, ms);
+}
+
+void NatRtpSink::stop()
+{
+    m_env->scheduler()->removeTimedEvent(m_timer_id);
+}
+
+void NatRtpSink::timeoutCallback(void* arg)
+{
+    NatRtpSink* rtpSink = (NatRtpSink*)arg;
+    NatAvFrame* frame = rtpSink->m_media_source->getFrame();
+    if(!frame)
+    {
+        return;
+    }
+
+    rtpSink->handleFrame(frame);
+
+    rtpSink->m_media_source->putFrame(frame);
+}
+
+#include <sys/time.h>
+static long GetTime() {
+    struct timeval time_;
+    memset(&time_, 0, sizeof(struct timeval));
+
+    gettimeofday(&time_, NULL);
+    return time_.tv_sec*1000 + time_.tv_usec/1000;
+}
+
+
+NatH264RtpSink* NatH264RtpSink::createNew(UsageEnvironment* env, MediaSource* media_source)
+{
+    if(!media_source)
+        return NULL;
+
+    return New<NatH264RtpSink>::allocate(env, media_source);
+}
+
+NatH264RtpSink::NatH264RtpSink(UsageEnvironment* env, MediaSource* media_source) : 
+	NatRtpSink(env, media_source, 96), m_clock_rate(90000), m_fps(media_source->getFps())
+{
+    start(10);
 }
 
 NatH264RtpSink::~NatH264RtpSink()
@@ -147,9 +197,18 @@ void NatH264RtpSink::handleFrame(NatAvFrame* frame)
 }
 
 
-NatH265RtpSink::NatH265RtpSink(int fps) : 
-	NatRtpSink(96), m_clock_rate(90000), m_fps(fps)
+NatH265RtpSink* NatH265RtpSink::createNew(UsageEnvironment* env, MediaSource* media_source)
 {
+    if(!media_source)
+        return NULL;
+
+    return New<NatH265RtpSink>::allocate(env, media_source);
+}
+
+NatH265RtpSink::NatH265RtpSink(UsageEnvironment* env, MediaSource* media_source) : 
+	NatRtpSink(env, media_source, 96), m_clock_rate(90000), m_fps(media_source->getFps())
+{
+    start(10);
 }
 
 NatH265RtpSink::~NatH265RtpSink()
@@ -257,9 +316,15 @@ void NatH265RtpSink::handleFrame(NatAvFrame* frame)
 }
 
 
-NatAACRtpSink::NatAACRtpSink(int sample_rate, int channels) : 
-	NatRtpSink(97), m_sample_rate(sample_rate), m_channels(channels)
+NatAACRtpSink* NatAACRtpSink::createNew(UsageEnvironment* env, MediaSource* media_source, int sample_rate, int channels)
 {
+    return New<NatAACRtpSink>::allocate(env, media_source, sample_rate, channels);
+}
+
+NatAACRtpSink::NatAACRtpSink(UsageEnvironment* env, MediaSource* media_source, int sample_rate, int channels) : 
+	NatRtpSink(env, media_source, 97), m_sample_rate(sample_rate), m_channels(channels)
+{
+    start(((1024*1000)/sample_rate) * 0.5);
 }
 
 NatAACRtpSink::~NatAACRtpSink()
@@ -352,9 +417,15 @@ void NatAACRtpSink::handleFrame(NatAvFrame* frame)
 
 
 
-NatG711aRtpSink::NatG711aRtpSink(int sample_rate, int channels) : 
-	NatRtpSink(97), m_sample_rate(sample_rate), m_channels(channels)
+NatG711aRtpSink* NatG711aRtpSink::createNew(UsageEnvironment* env, MediaSource* media_source, int sample_rate, int channels)
 {
+    return New<NatG711aRtpSink>::allocate(env, media_source, sample_rate, channels);
+}
+
+NatG711aRtpSink::NatG711aRtpSink(UsageEnvironment* env, MediaSource* media_source, int sample_rate, int channels) : 
+	NatRtpSink(env, media_source, 97), m_sample_rate(sample_rate), m_channels(channels)
+{
+    start(10);
 }
 
 NatG711aRtpSink::~NatG711aRtpSink()

@@ -1,18 +1,8 @@
 #ifndef __NAT_MEDIA_H__
 #define __NAT_MEDIA_H__
 
-
 #include <list>
 #include "nat_rtp.h"
-
-int NatMediaVideoPush(int chn, uint8_t* pkt, uint32_t size, uint64_t pts);
-
-int NatMediaVideoPop(int chn, uint8_t* pkt, uint32_t size, uint64_t* pts);
-
-int NatMediaAudioPush(int chn, uint8_t* pkt, uint32_t size, uint64_t pts);
-
-int NatMediaAudioPop(int chn, uint8_t* pkt, uint32_t size, uint64_t* pts);
-
 
 #define NAT_MEDIA_MAX_TRACK_NUM 2
 
@@ -28,6 +18,8 @@ public:
         TrackId1    = 1,
     };
 
+    static NatMediaSession* createNew(int chn);
+
 	NatMediaSession(int chn);
 	~NatMediaSession();
 
@@ -36,7 +28,6 @@ public:
 	bool removeTrInstance(int tr);
 	void setSendPacketCb(NatSendPacketCb cb) { m_cb = cb;};
 
-	void frameHandle(NatMediaSession::TrackId track_id, NatAvFrame* frame);
 	bool isSupport(NatMediaSession::TrackId track_id);
 	std::string getDescription(NatMediaSession::TrackId track_id);
 

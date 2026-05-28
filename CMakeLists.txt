@@ -8,6 +8,9 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/example MAIN_SRC)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/src SRC)
+aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/src/rtp/base SRC)
+aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/src/rtp/net SRC)
+aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/src/rtp/poller SRC)
 
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/general_src/common SRC)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/general_src/http SRC)
@@ -19,6 +22,7 @@ aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/third_src/mongoose SRC)
 
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src/rtp)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/general_src/common)
