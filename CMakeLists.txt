@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 2.8)
 project(nat)
 
 add_definitions(-DUSE_EASYLOGGER)
-add_definitions(-D_GNU_SOURCE)
+# add_definitions(-D_GNU_SOURCE)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
@@ -82,7 +82,7 @@ add_executable(nat_test ${MAIN_SRC})
 target_link_libraries(nat_test nat pthread m dl stdc++)
 
 if (MEDIA_TYPE STREQUAL "ffmpeg")
-target_link_libraries(nat_test avdevice avfilter avcodec avformat avutil postproc swresample swscale x264)
+target_link_libraries(nat_test avdevice avfilter avcodec avformat avutil postproc swresample swscale x264 atomic)
 endif()
 
 install(TARGETS nat_test DESTINATION bin)

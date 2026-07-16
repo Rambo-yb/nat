@@ -27,8 +27,8 @@
 #define NAT_DEFAULT_LOGS_PATH "/data/logs"
 #define NAT_DEFAULT_CONFS_PATH "/data/confs"
 
-// #define NAT_SIGNALING_SERVER_URL "ws://10.42.0.201:8765"
-#define NAT_SIGNALING_SERVER_URL "ws://8.136.196.77:8765"
+#define NAT_SIGNALING_SERVER_URL "ws://10.42.0.201:8765"
+// #define NAT_SIGNALING_SERVER_URL "ws://8.136.196.77:8765"
 
 #define NAT_MAX_CHN_NUM 2
 
@@ -55,7 +55,8 @@ typedef struct {
 	ThreadPool* thread_pool;
 	UsageEnvironment* env;
 }NatMng;
-static NatMng kNatMng = {.client_mutex = PTHREAD_MUTEX_INITIALIZER, .media_mutex = PTHREAD_MUTEX_INITIALIZER};
+// static NatMng kNatMng = {.client_mutex = PTHREAD_MUTEX_INITIALIZER, .media_mutex = PTHREAD_MUTEX_INITIALIZER};
+static NatMng kNatMng;
 
 static void NatRtcMessageCb(int id, const char* message, int size, void* user_ptr);
 static void NatRtcCloseCb(int id, void* user_ptr);
@@ -139,7 +140,7 @@ static void NatRtcDescriptionCb(int pc, const char *sdp, const char *type, void 
 			CJSON_SET_STRING(json, "serial", kNatMng.serial, cJSON_free(json);break);
 			CJSON_SET_STRING(json, "target", i.first.c_str(), cJSON_free(json);break);
 
-			char encrypt_sdp[1024*4] = {0};
+			char encrypt_sdp[1024*8] = {0};
 			NatEncryptBase64((const unsigned char*)sdp, strlen(sdp), encrypt_sdp, sizeof(encrypt_sdp));
 			CJSON_SET_STRING(json, "sdp", encrypt_sdp, cJSON_free(json);break);
 
@@ -250,9 +251,9 @@ static void NatRtcCloseCb(int id, void* user_ptr) {
 static void NatPeerConnection(NatClientInfo* cli_info) {
 	rtcConfiguration config;
 	memset(&config, 0, sizeof(config));
-    const char* stun_server[1] = {"stun:stun.l.google.com:19302"};
-    config.iceServers = stun_server;
-    config.iceServersCount = 1;
+    // const char* stun_server[1] = {"stun:stun.l.google.com:19302"};
+    // config.iceServers = stun_server;
+    config.iceServersCount = 0;
     config.iceTransportPolicy = RTC_TRANSPORT_POLICY_ALL;
     config.enableIceTcp = 0;
 	cli_info->pc = rtcCreatePeerConnection(&config);
@@ -266,8 +267,16 @@ static void NatPeerConnection(NatClientInfo* cli_info) {
 		for (int j = 0; j < 2; j++) {
 			NatMediaSession::TrackId track_id = (j == 0) ? NatMediaSession::TrackId0 : NatMediaSession::TrackId1;
 			if(i.second->isSupport(track_id)) {
-				std::string sdp = i.second->getDescription(track_id);
-				cli_info->tr[i.first][j] = rtcAddTrack(cli_info->pc, sdp.c_str());
+				rtcTrackInit track;
+				memset(&track, 0, sizeof(rtcTrackInit));
+				track.direction = RTC_DIRECTION_SENDONLY;
+				track.codec = track_id == NatMediaSession::TrackId0 ? RTC_CODEC_H264 : RTC_CODEC_AAC;
+				track.payloadType = track_id == NatMediaSession::TrackId0 ? 96 : 97;
+				track.ssrc = i.second->getSsrc(track_id);
+				track.mid = track_id == NatMediaSession::TrackId0 ? "video" : "audio";
+				track.name = track_id == NatMediaSession::TrackId0 ? "datachannel_video" : "datachannel_audio";
+				cli_info->tr[i.first][j] = rtcAddTrackEx(cli_info->pc, &track);
+
 				rtcSetOpenCallback(cli_info->tr[i.first][j], NatRtcOpenCb);
 				rtcSetClosedCallback(cli_info->tr[i.first][j], NatRtcCloseCb);
 				rtcSetMessageCallback(cli_info->tr[i.first][j], NatRtcMessageCb);
@@ -328,7 +337,7 @@ static void NatWsMessageProc(int id, const char* message, int size) {
 		char sdp[1024*4] = {0};
 	    CJSON_GET_STRING(json, "sdp", sdp, sizeof(sdp), goto err);
 		
-		char decrypt_sdp[1024*4] = {0};
+		char decrypt_sdp[1024*8] = {0};
 		int ret = NatDecryptBase64(sdp, (unsigned char*)decrypt_sdp, sizeof(decrypt_sdp));
 		CHECK_LE(ret, 0, NAT_WS_MESSAGE_ERROR_RESP(resp, 400, "sdp decrypt fail", session_id);goto err);
 
@@ -537,6 +546,9 @@ int NatInit(NatInitialInfo* info) {
 	snprintf(file_path, sizeof(file_path), "%s/nat.log", log_path);
 	LogInit(file_path, 512*1024, 3, 3);
 
+	pthread_mutex_init(&kNatMng.client_mutex, nullptr);
+    pthread_mutex_init(&kNatMng.media_mutex, nullptr);
+
 	rtcInitLogger(RTC_LOG_VERBOSE, NatRtcLogCb);
 
 	NatConfInit((info == NULL || info->conf_path == NULL) ? NAT_DEFAULT_CONFS_PATH : info->conf_path);
@@ -550,7 +562,7 @@ int NatInit(NatInitialInfo* info) {
 
 	pthread_create(&kNatMng.pthread_media_proc, NULL, NatMediaProc, NULL);
 
-    LOG_INFO("rtsp server init success! compile time:%s %s, ver:%s", __DATE__, __TIME__, NAT_LIB_VERSION);
+    LOG_INFO("NAT protocol init success! compile time:%s %s, ver:%s", __DATE__, __TIME__, NAT_LIB_VERSION);
 	return 0;
 }
 
@@ -566,6 +578,9 @@ void NatUnInit() {
     }
 
 	NatConfUninit();
+
+	pthread_mutex_destroy(&kNatMng.client_mutex);
+	pthread_mutex_destroy(&kNatMng.media_mutex);
 
 	if (kNatMng.ws != 0) {
 		rtcDeleteWebSocket(kNatMng.ws);

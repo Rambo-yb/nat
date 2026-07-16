@@ -79,12 +79,12 @@ bool NatMediaSession::isSupport(NatMediaSession::TrackId track_id) {
 	return track->m_rtp_sink != NULL;
 }
 
-std::string NatMediaSession::getDescription(NatMediaSession::TrackId track_id) {
+uint32_t NatMediaSession::getSsrc(NatMediaSession::TrackId track_id) {
 	NatTrack* track = getTrack(track_id);
     if(!track)
-        return "";
+        return 0;
 	
-	return track->m_rtp_sink->getDescription();
+	return track->m_rtp_sink->getSsrc();
 }
 
 NatMediaSession::NatTrack* NatMediaSession::getTrack(NatMediaSession::TrackId track_id)

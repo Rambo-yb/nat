@@ -98,19 +98,8 @@ NatH264RtpSink::~NatH264RtpSink()
 {
 }
 
-std::string NatH264RtpSink::getDescription() {
-	char buff[1024] = {0};
-	snprintf(buff, sizeof(buff), "m=video 9 RTP/AVP %d\r\n", m_payload_type);
-	snprintf(buff + strlen(buff), sizeof(buff) - strlen(buff), 
-		"a=mid:video\r\n"
-		"a=sendonly\r\n"
-		"a=ssrc:%s\r\n", 
-		std::to_string(m_ssrc).c_str());
-
-    snprintf(buff + strlen(buff), sizeof(buff) - strlen(buff), "a=rtpmap:%d H264/%d\r\n", m_payload_type, m_clock_rate);
-    snprintf(buff + strlen(buff), sizeof(buff) - strlen(buff), "a=framerate:%d", m_fps);
-	
-	return std::string(buff);
+uint32_t NatH264RtpSink::getSsrc() {
+	return m_ssrc;
 }
 
 void NatH264RtpSink::handleFrame(NatAvFrame* frame)
@@ -124,7 +113,7 @@ void NatH264RtpSink::handleFrame(NatAvFrame* frame)
 		NatRtpData rtp_data;
 		memset(&rtp_data, 0, sizeof(NatRtpData));
 		rtp_data.rtp_header.timestamp = m_timestamp;
-		rtp_data.rtp_header.marker = 1;
+		rtp_data.rtp_header.marker = (naluType & 0x1F) <= 5 ? 1 : 0;
 		memcpy(rtp_data.frame, frame->m_frame, frame->m_frame_size);
 		rtp_data.size = frame->m_frame_size;
 		rtp_data.rtp_header.seq = m_seq;
@@ -145,7 +134,7 @@ void NatH264RtpSink::handleFrame(NatAvFrame* frame)
 			if (i == 0) {
 				rtp_data.frame[1] |= 0x80;
 			} else if (remain_pkt_size == 0 && i == pkt_num - 1) {
-				rtp_data.rtp_header.marker = 1;
+				rtp_data.rtp_header.marker = (naluType & 0x1F) <= 5 ? 1 : 0;
 				rtp_data.frame[1] |= 0x40;
 			}
 
@@ -162,7 +151,7 @@ void NatH264RtpSink::handleFrame(NatAvFrame* frame)
 			NatRtpData rtp_data;
 			memset(&rtp_data, 0, sizeof(NatRtpData));
 			rtp_data.rtp_header.timestamp = m_timestamp;
-			rtp_data.rtp_header.marker = 1;
+			rtp_data.rtp_header.marker = (naluType & 0x1F) <= 5 ? 1 : 0;
 			rtp_data.frame[0] = (naluType & 0xe0) | 28;
 			rtp_data.frame[1] = naluType & 0x1F;
 			rtp_data.frame[1] |= 0x40;
@@ -188,7 +177,7 @@ void NatH264RtpSink::handleFrame(NatAvFrame* frame)
 		m_rtp_queue.pop();
 	}
 
-	if ((naluType & 0x1F) == 7 || (naluType & 0x1F) == 8 || (naluType & 0x1F) == 6)
+	if ((naluType & 0x1F) == 7 || (naluType & 0x1F) == 8 || (naluType & 0x1F) == 6 || (naluType & 0x1F) == 9)
 		return;
 
 	if(frame->m_pts == -1) {
@@ -215,19 +204,8 @@ NatH265RtpSink::~NatH265RtpSink()
 {
 }
 
-std::string NatH265RtpSink::getDescription() {
-	char buff[1024] = {0};
-	snprintf(buff, sizeof(buff), "m=video 9 RTP/AVP %d\r\n", m_payload_type);
-	snprintf(buff + strlen(buff), sizeof(buff) - strlen(buff), 
-		"a=mid:video\r\n"
-		"a=sendonly\r\n"
-		"a=ssrc:%s\r\n", 
-		std::to_string(m_ssrc).c_str());
-
-    snprintf(buff + strlen(buff), sizeof(buff) - strlen(buff), "a=rtpmap:%d H265/%d\r\n", m_payload_type, m_clock_rate);
-    snprintf(buff + strlen(buff), sizeof(buff) - strlen(buff), "a=framerate:%d", m_fps);
-	
-	return std::string(buff);
+uint32_t NatH265RtpSink::getSsrc() {
+	return m_ssrc;
 }
 
 void NatH265RtpSink::handleFrame(NatAvFrame* frame)
@@ -331,48 +309,8 @@ NatAACRtpSink::~NatAACRtpSink()
 {
 }
 
-std::string NatAACRtpSink::getDescription() {
-	char buff[1024] = {0};
-	snprintf(buff, sizeof(buff), "m=audio 9 RTP/AVP %d\r\n", m_payload_type);
-	snprintf(buff + strlen(buff), sizeof(buff) - strlen(buff), 
-		"a=mid:audio\r\n"
-		"a=sendonly\r\n"
-		"a=ssrc:%s\r\n", 
-		std::to_string(m_ssrc).c_str());
-
-	uint32_t aac_sample_rate[16] =
-	{
-		97000, 88200, 64000, 48000,
-		44100, 32000, 24000, 22050,
-		16000, 12000, 11025, 8000,
-		7350, 0, 0, 0 /*reserved */
-	};
-
-	uint8_t index = 0;
-	for (index = 0; index < 16; index++)
-	{
-		if (aac_sample_rate[index] == m_sample_rate)
-			break;
-	}
-
-	if (index == 16)
-		return "";
-
-	uint8_t profile = 1;
-	char config[10] = {0};
-	sprintf(config, "%02x%02x", (uint8_t)((profile+1) << 3)|(index >> 1),
-			(uint8_t)((index << 7)|(m_channels<< 3)));
-
-	snprintf(buff + strlen(buff), sizeof(buff) - strlen(buff), "a=rtpmap:97 mpeg4-generic/%u/%u\r\n", m_sample_rate, m_channels);
-
-	snprintf(buff + strlen(buff), sizeof(buff) - strlen(buff), 
-		"a=fmtp:%d profile-level-id=1;"
-		"mode=AAC-hbr;"
-		"sizelength=13;indexlength=3;indexdeltalength=3;"
-		"config=%04u",
-		m_payload_type, atoi(config));
-	
-	return std::string(buff);
+uint32_t NatAACRtpSink::getSsrc() {
+	return m_ssrc;
 }
 
 void NatAACRtpSink::handleFrame(NatAvFrame* frame)
@@ -432,18 +370,8 @@ NatG711aRtpSink::~NatG711aRtpSink()
 {
 }
 
-std::string NatG711aRtpSink::getDescription() {
-	char buff[1024] = {0};
-	snprintf(buff, sizeof(buff), "m=audio 9 RTP/AVP %d\r\n", m_payload_type);
-	snprintf(buff + strlen(buff), sizeof(buff) - strlen(buff), 
-		"a=mid:audio\r\n"
-		"a=sendonly\r\n"
-		"a=ssrc:%s\r\n", 
-		std::to_string(m_ssrc).c_str());
-
-	snprintf(buff + strlen(buff), sizeof(buff) - strlen(buff), "a=rtpmap:8 PCMA/%u/%u\r\n", m_sample_rate, m_channels);
-	
-	return std::string(buff);
+uint32_t NatG711aRtpSink::getSsrc() {
+	return m_ssrc;
 }
 
 void NatG711aRtpSink::handleFrame(NatAvFrame* frame)

@@ -2,6 +2,7 @@
 #define __NAT_MEDIA_H__
 
 #include <list>
+#include <stdint.h>
 #include "nat_rtp.h"
 
 #define NAT_MEDIA_MAX_TRACK_NUM 2
@@ -29,7 +30,7 @@ public:
 	void setSendPacketCb(NatSendPacketCb cb) { m_cb = cb;};
 
 	bool isSupport(NatMediaSession::TrackId track_id);
-	std::string getDescription(NatMediaSession::TrackId track_id);
+	uint32_t getSsrc(NatMediaSession::TrackId track_id);
 
 private:
     class NatTrack

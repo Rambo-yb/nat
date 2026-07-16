@@ -72,7 +72,7 @@ public:
 	NatRtpSink(UsageEnvironment* env, MediaSource* media_source, int payload_type);
 	void setSendFrameCallback(SendPacketCallback cb, void* arg1, void* arg2);
 
-	virtual std::string getDescription() = 0;
+	virtual uint32_t getSsrc() = 0;
 protected:
 	virtual void handleFrame(NatAvFrame* frame) = 0;
     int sendRtpPacket(NatRtpPacket* packet, uint16_t seq, uint32_t ts, uint8_t marker);
@@ -117,7 +117,7 @@ public:
 	NatH264RtpSink(UsageEnvironment* env, MediaSource* media_source);
 	virtual ~NatH264RtpSink();
 	void handleFrame(NatAvFrame* frame);
-	std::string getDescription();
+	uint32_t getSsrc();
 private:
     NatRtpPacket m_rtp_packet;
     int m_clock_rate;
@@ -131,7 +131,7 @@ public:
 	NatH265RtpSink(UsageEnvironment* env, MediaSource* media_source);
 	virtual ~NatH265RtpSink();
 	void handleFrame(NatAvFrame* frame);
-	std::string getDescription();
+	uint32_t getSsrc();
 private:
     NatRtpPacket m_rtp_packet;
     int m_clock_rate;
@@ -145,7 +145,7 @@ public:
 	NatAACRtpSink(UsageEnvironment* env, MediaSource* media_source, int sample_rate, int channels);
 	virtual ~NatAACRtpSink();
 	void handleFrame(NatAvFrame* frame);
-	std::string getDescription();
+	uint32_t getSsrc();
 private:
     NatRtpPacket m_rtp_packet;
 	int m_sample_rate;
@@ -159,7 +159,7 @@ public:
 	NatG711aRtpSink(UsageEnvironment* env, MediaSource* media_source, int sample_rate, int channels);
 	virtual ~NatG711aRtpSink();
 	void handleFrame(NatAvFrame* frame);
-	std::string getDescription();
+	uint32_t getSsrc();
 private:
     NatRtpPacket m_rtp_packet;
 	int m_sample_rate;
